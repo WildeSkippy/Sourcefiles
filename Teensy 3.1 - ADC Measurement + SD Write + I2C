@@ -1,0 +1,361 @@
+/* Example for synchonized measurements using both ADC present in Teensy 3.1
+*  You can change the number of averages, bits of resolution and also the comparison value or range.
+*/
+
+//Inclusing Libraries
+#include <ADC.h>
+#include <SD.h>
+#include <string.h>
+#include <Time.h>  
+
+// I2C - Libraries
+#include <i2c_t3.h>
+#ifdef I2C_DEBUG
+    #include <rbuf.h> // linker fix
+#endif
+
+//Define ADC Inputs
+#define ADC_0 1
+#define ADC_1 1
+
+// I2C - Command definitions
+#define WRITE 0x10
+#define READ  0x20
+
+// I2C - Function prototypes
+void receiveEvent(size_t len);
+void requestEvent(void);
+
+// I2C - Memory
+#define MEM_LEN 256
+uint8_t mem[MEM_LEN];
+uint8_t cmd;
+size_t addr;
+
+//Teensy 3.1 has the LED on pin 13
+//const int ledPin = 13;
+const int readPin0 = A2;  //ADC read A2
+const int readPin1 = A3;  //ADC read A3
+const int chipSelect = 10;  //CS(SS) select SD-Card
+
+
+ADC *adc = new ADC(); // adc object
+
+File myFile;
+char filename[] = "00000000.txt";
+
+void setup() 
+{
+  setSyncProvider(getTeensy3Time);
+  //pinMode(ledPin, OUTPUT);
+  pinMode(readPin0, INPUT);  //Read analog signal pin1
+  pinMode(readPin1, INPUT);  //Read analog signal pin2
+
+  //Set Serial
+  Serial.begin(115200);
+  //  while (!Serial);  // Wait for Arduino Serial Monitor to open
+    
+  //Set Time
+  if (timeStatus()!= timeSet) {
+    Serial.println("Unable to sync with the RTC");
+  } else {
+    Serial.println("RTC has set the system time");
+  }
+  //Set ADC (Averaging and Resolution)  
+  adc->setAveraging(16, ADC_0); // set number of averages
+  adc->setResolution(12), ADC_0; // set bits of resolution
+
+  adc->setAveraging(16, ADC_1); // set number of averages
+  adc->setResolution(12, ADC_1); // set bits of resolution
+
+  // always call the compare functions after changing the resolution!
+  //adc->enableCompare(1.0/3.3*adc.getMaxValue(), 0, ADC_0); // measurement will be ready if value < 1.0V
+  //adc->enableCompareRange(1.0*adc.getMaxValue(ADC_1)/3.3, 2.0*adc.getMaxValue(ADC_1)/3.3, 0, 1, ADC_1); // ready if value lies out of [1.0,2.0] V
+
+  //delay(100);
+  Serial.println("end setup");
+  Serial.println("");
+  
+  //Initializing SD Card for writing
+  Serial.print("Initializing SD card...");
+  // On the Ethernet Shield, CS is pin 4. It's set as an output by default.
+  // Note that even if it's not used as the CS pin, the hardware SS pin 
+  // (10 on most Arduino boards, 53 on the Mega) must be left as an output 
+  // or the SD library functions will not work. 
+  pinMode(chipSelect, OUTPUT);
+   
+  if (!SD.begin(chipSelect)) {
+    Serial.println("Initialization failed!");
+    return;
+  }
+  Serial.println("Initialization done.");
+ 
+  getFileName();
+  createFileName(); 
+ 
+  // Setup for Slave mode, address 0x44, pins 18/19, external pullups, 400kHz
+    Wire.begin(I2C_SLAVE, 0x44, I2C_PINS_18_19, I2C_PULLUP_EXT, I2C_RATE_100);
+
+    // init vars
+    cmd = 0;
+    addr = 0;
+    for(size_t i=0; i < MEM_LEN; i++)
+        mem[i] = 0;
+
+    // register events
+    Wire.onReceive(receiveEvent);
+    Wire.onRequest(requestEvent); 
+}
+
+//int value0 = 0;
+//int value1 = 0;
+ADC::Sync_result result;
+
+void loop() {
+  if (Serial.available()) {
+     time_t t = processSyncMessage();
+     if (t != 0) {
+     Teensy3Clock.set(t); // set the RTC
+     setTime(t);
+     }
+  }
+    //delay(5000);  
+  
+  myFile = SD.open(filename, FILE_WRITE);
+ 
+//ADC values   
+  result = adc->analogSynchronizedRead(readPin0, readPin1);
+  int ADCvalue_0 = result.result_adc0;
+  int ADCvalue_1 = result.result_adc1;
+  // open the file. note that only one file can be open at a time,
+  // so you have to close this one before opening another.
+  
+  
+  if( (result.result_adc0 !=ADC_ERROR_VALUE) && (result.result_adc1 !=ADC_ERROR_VALUE) ) {
+
+    // the test results below were obtained commenting out all Serial.print*() and the delay() lines
+    // the decimal point is a comma, print.cpp has been changed for this. instead of a point, a comma has been used  
+      //GPIOC_PTOR = 1<<5;
+      Serial.print("Time: ");
+      digitalClockDisplay_WriteToSerial();
+        Serial.print("\t(ADC0): ");  
+        Serial.print(ADCvalue_0*3.3/adc->adc0->getMaxValue(), DEC);
+        Serial.print("\tA3(ADC1): ");
+        Serial.println(ADCvalue_1*3.3/adc->adc1->getMaxValue(), DEC);
+      if (myFile) {   
+          (digitalClockDisplay_WriteToSD());
+          myFile.print("\t");
+          myFile.print(10*ADCvalue_0*3.3/adc->adc0->getMaxValue(), DEC);
+          myFile.print("\t");
+          myFile.println(10*ADCvalue_1*3.3/adc->adc1->getMaxValue(), DEC);
+    
+      //close the file:
+      myFile.close();
+      //Serial.println("done.");
+
+  } else {
+ // if the file didn't open, print an error:
+    Serial.println("Error 1: Can't open file!");
+  } 
+  } else {
+      Serial.println("Error 2: Comparison failed");
+  }
+  
+
+    GPIOC_PTOR = 1<<5;
+
+
+  delay(4);
+}
+
+void readFile(){  
+      // re-open the file for reading:
+      myFile = SD.open(filename);
+      if (myFile) {
+          Serial.println("Last file:");
+    
+       // read from the file until there's nothing else in it:
+      while (myFile.available()) {
+    	  Serial.write(myFile.read());
+       }
+ 
+      // close the file:
+      myFile.close();
+      } else {
+      	// if the file didn't open, print an error:
+        Serial.println("Error 3: Can't open file");
+      }
+}      
+
+
+void getFileName(){
+filename[0] = (month()/10)%10 + '0'; //To get 1st digit from year()      '2';
+filename[1] = month()%10 + '0'; //To get 2nd digit from year()      '0';
+filename[2] = (day()/10)%10 + '0'; //To get 3rd digit from year()      '1';
+filename[3] = day()%10 + '0'; //To get 4th digit from year()      '4';
+filename[4] = (hour()/10)%10 + '0'; //To get 1st digit from month()      '0';
+filename[5] = hour()%10 + '0'; //To get 2nd digit from month()      '5';
+filename[6] = (minute()/10)%10 + '0'; //To get 1st digit from day()      '1';
+filename[7] = minute()%10 + '0'; //To get 2nd digit from day()      '6';
+/*filename[0] = (year()/1000)%10 + '0'; //To get 1st digit from year()      '2';
+filename[1] = (year()/100)%10 + '0'; //To get 2nd digit from year()      '0';
+filename[2] = (year()/10)%10 + '0'; //To get 3rd digit from year()      '1';
+filename[3] = year()%10 + '0'; //To get 4th digit from year()      '4';
+filename[4] = (month()/10)%10 + '0'; //To get 1st digit from month()      '0';
+filename[5] = month()%10 + '0'; //To get 2nd digit from month()      '5';
+filename[6] = (day()/10)%10 + '0'; //To get 1st digit from day()      '1';
+filename[7] = day()%10 + '0'; //To get 2nd digit from day()      '6';        */                  
+filename[8] = '.';
+filename[9] = 't';
+filename[10] = 'x';
+filename[11] = 't';
+Serial.println(filename);
+}
+
+void createFileName(){
+//Check file name exist?
+if (SD.exists(filename)) {
+Serial.println("exists.");
+}
+else {
+Serial.println("Filename doesn't exist.");
+Serial.println("Creating a new file");
+Serial.println(filename);
+myFile = SD.open(filename, FILE_WRITE);
+  myFile.print("Date: ");
+  myFile.print(day());
+  myFile.print("-");
+  myFile.print(month());
+  myFile.print("-");
+  myFile.print(year()); 
+  myFile.print("\t");
+   myFile.print(hour());
+  myFile.print(":");
+  myFile.print(minute());
+  myFile.print(":");
+  myFile.println(second());
+myFile.close();
+}
+}
+
+void digitalClockDisplay_WriteToSerial() {
+  // digital clock display of the time
+  Serial.print(day());
+  Serial.print("-");
+  Serial.print(month());
+  Serial.print("-");
+  Serial.print(year()); 
+  Serial.print("\t");
+  Serial.print(hour());
+  printDigits(minute());
+  printDigits(second());
+  //Serial.println("\t"); 
+}
+
+void digitalClockDisplay_WriteToSD() {
+  // digital clock display of the time
+//  myFile.print(day());
+//  myFile.print("-");
+//  myFile.print(month());
+//  myFile.print("-");
+//  myFile.print(year()); 
+//  myFile.print("\t");
+  myFile.print(hour());
+  myFile.print(":");
+  myFile.print(minute());
+  myFile.print(":");
+  myFile.print(second());
+  myFile.print(",");
+  myFile.print(millis());
+ //Serial.println("\t"); 
+}
+
+time_t getTeensy3Time()
+{
+  return Teensy3Clock.get();
+}
+
+/*  code to process time sync messages from the serial port   */
+#define TIME_HEADER  "T"   // Header tag for serial time sync message
+
+unsigned long processSyncMessage() {
+  unsigned long pctime = 0L;
+  const unsigned long DEFAULT_TIME = 1357041600; // Jan 1 2013 
+
+  if(Serial.find(TIME_HEADER)) {
+     pctime = Serial.parseInt();
+     return pctime;
+     if( pctime < DEFAULT_TIME) { // check the value is a valid time (greater than Jan 1 2013)
+       pctime = 0L; // return 0 to indicate that the time is not valid
+     }
+  }
+  return pctime;
+}
+
+void printDigits(int digits){
+  // utility function for digital clock display: prints preceding colon and leading 0
+  Serial.print(":");
+  if(digits < 10)
+    Serial.print('0');
+  Serial.print(digits);
+}
+
+
+
+
+
+//
+// handle Rx Event (incoming I2C request/data)
+//
+void receiveEvent(size_t len)
+{
+    if(Wire.available())
+    {
+        // grab command
+        cmd = Wire.readByte();
+        switch(cmd)
+        {
+        case WRITE:
+            addr = Wire.readByte();                // grab addr
+            while(Wire.available())
+                if(addr < MEM_LEN)                 // drop data beyond mem boundary
+                    mem[addr++] = Wire.readByte(); // copy data to mem
+                else
+                    Wire.readByte();               // drop data if mem full
+            break;
+
+        case READ:
+            addr = Wire.readByte();                // grab addr
+            break;
+        }
+    }
+}
+
+//
+// handle Tx Event (outgoing I2C data)
+//
+void requestEvent(void)
+{
+    switch(cmd)
+    {
+    case READ:
+        Wire.write(&mem[addr], MEM_LEN-addr); // fill Tx buffer (from addr location to end of mem)
+        break;
+    }
+}
+
+//
+// print I2C status
+//
+void print_i2c_status(void)
+{
+    switch(Wire.status())
+    {
+    case I2C_WAITING:  Serial.print("I2C waiting, no errors\n"); break;
+    case I2C_ADDR_NAK: Serial.print("Slave addr not acknowledged\n"); break;
+    case I2C_DATA_NAK: Serial.print("Slave data not acknowledged\n"); break;
+    case I2C_ARB_LOST: Serial.print("Bus Error: Arbitration Lost\n"); break;
+    default:           Serial.print("I2C busy\n"); break;
+    }
+}
+
